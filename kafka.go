@@ -3,129 +3,114 @@ package kafkautil
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
 
-// IsValid checks for the topic is found and the partition counts match
-func IsValid(topic *kafka.TopicSpecification, hosts string) (*ACXTopicValidationResult, *ACXTopicValidationError) {
-	client, _ := kafka.NewAdminClient(&kafka.ConfigMap{
-		"bootstrap.servers": hosts,
-	})
-
-	meta, _ := client.GetMetadata(nil, true, 2000)
-
-	for _, t := range meta.Topics {
-		if t.Topic == topic.Topic && len(t.Partitions) == topic.NumPartitions {
-			client.Close()
-			return &ACXTopicValidationResult{Topic: t}, nil
-		}
-	}
-
-	client.Close()
-	return nil, &ACXTopicValidationError{Message: "Not Found"}
+// ACXKafkaClient Wrapper on Kafka Client with ACX Specific functions
+type ACXKafkaClient struct {
+	AdminClient *kafka.AdminClient
+	topicSpecs  []kafka.TopicSpecification
 }
 
-// IsAvailable checks for the topic does not exist
-func IsAvailable(topic *kafka.TopicSpecification, hosts string) bool {
-	client, _ := kafka.NewAdminClient(&kafka.ConfigMap{
-		"bootstrap.servers": hosts,
-	})
-
-	meta, _ := client.GetMetadata(nil, true, 2000)
-
-	for _, t := range meta.Topics {
-		if t.Topic == topic.Topic {
-			client.Close()
-			return false
-		}
-	}
-
-	client.Close()
-	return true
-}
-
-func checkAvailability(topics *[]kafka.TopicSpecification, hosts string) *[]ACXCreateTopicError {
-	errors := make([]ACXCreateTopicError, 0)
-
-	for _, topic := range *topics {
-		if IsAvailable(&topic, hosts) == false {
-			errors = append(errors, ACXCreateTopicError{topic, "Unavailable"})
-		}
-	}
-
-	return &errors
-}
-
-func validateTopics(topics *[]kafka.TopicSpecification, hosts string) (bool, []*ACXCreateTopicError) {
-	errors := make([]*ACXCreateTopicError, 0)
-
-	for _, topic := range *topics {
-		_, error := IsValid(&topic, hosts)
-
-		if error != nil {
-			errors = append(errors, &ACXCreateTopicError{topic, "Unavailable"})
-		}
-	}
-
-	if len(errors) > 0 {
-		return false, errors
-	}
-
-	return true, nil
-}
-
-func parseConfig(config *KafkaConfig) []kafka.TopicSpecification {
-	var topics = make([]kafka.TopicSpecification, 0)
+// NewACXKafkaClient Creates a new KafkaClient
+func (a *ACXKafkaClient) NewACXKafkaClient(client *kafka.AdminClient, config *KafkaConfig) *ACXKafkaClient {
+	a.topicSpecs = make([]kafka.TopicSpecification, 0)
 
 	for _, topic := range config.Topics {
-		topics = append(topics, kafka.TopicSpecification{
+		a.topicSpecs = append(a.topicSpecs, kafka.TopicSpecification{
 			Topic:             topic.Name,
 			NumPartitions:     topic.Partitions,
 			ReplicationFactor: config.ReplicationFactor,
 		})
 	}
 
-	return topics
+	return &ACXKafkaClient{
+		AdminClient: client,
+	}
 }
 
-func loadConfig(path string) (*KafkaConfig, error) {
+// UnmarshalConfig takes in a path and loads the KafkaConfig
+func UnmarshalConfig(path string, fileName string) *KafkaConfig {
 	viper.Set("Verbose", true)
 
 	var config KafkaConfig
 
-	viper.SetConfigName("kafka-config.yaml")
-	viper.AddConfigPath(".")
+	viper.SetConfigName(fileName)
+	viper.AddConfigPath(path)
 
 	err := viper.ReadInConfig()
 	if err != nil {
 		panic("Error in Configuration File")
 	}
+
 	viper.Unmarshal(&config)
 
-	return &config, err
+	return &config
+}
+
+func (a *ACXKafkaClient) verifyTopic(topic *kafka.TopicSpecification) (*ACXTopicValidationResult, *ACXTopicValidationError) {
+	meta, _ := a.AdminClient.GetMetadata(nil, true, 2000)
+
+	for _, t := range meta.Topics {
+		if t.Topic == topic.Topic && len(t.Partitions) == topic.NumPartitions {
+			return &ACXTopicValidationResult{Topic: t}, nil
+		}
+	}
+
+	return nil, &ACXTopicValidationError{Message: "Not Found"}
+}
+
+func (a *ACXKafkaClient) topicExists(topic *kafka.TopicSpecification) bool {
+	meta, _ := a.AdminClient.GetMetadata(nil, true, 2000)
+
+	for _, t := range meta.Topics {
+		if t.Topic == topic.Topic {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (a *ACXKafkaClient) verifyTopics() *[]ACXCreateTopicError {
+	errors := make([]ACXCreateTopicError, 0)
+
+	for _, topicSpec := range a.topicSpecs {
+		if a.topicExists(&topicSpec) == false {
+			errors = append(errors, ACXCreateTopicError{topicSpec, "Unavailable"})
+		}
+	}
+
+	return &errors
+}
+
+func (a *ACXKafkaClient) checkAvailability() *[]ACXCreateTopicError {
+	errors := make([]ACXCreateTopicError, 0)
+
+	for _, topicSpec := range a.topicSpecs {
+		_, error := a.verifyTopic(&topicSpec)
+
+		if error != nil {
+			errors = append(errors, ACXCreateTopicError{topicSpec, "Unavailable"})
+		}
+	}
+
+	if len(errors) > 0 {
+		return &errors
+	}
+
+	return nil
 }
 
 // CreateTopics create topics based on configuration file
-func CreateTopics(config *KafkaConfig) ([]kafka.TopicResult, *[]ACXCreateTopicError) {
-	topicSpecs := parseConfig(config)
-
-	errors := checkAvailability(&topicSpecs, strings.Join(config.Hosts, ","))
-
-	client, err := kafka.NewAdminClient(&kafka.ConfigMap{
-		"bootstrap.servers": strings.Join(config.Hosts, ","),
-	})
+func (a *ACXKafkaClient) CreateTopics() []kafka.TopicResult {
+	err := a.checkAvailability()
 
 	if err != nil {
-		fmt.Printf("Failed Connecting: %v\n", err)
-	}
-
-	if len(*errors) > 0 {
-		client.Close()
-		return nil, errors
+		panic(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -133,38 +118,30 @@ func CreateTopics(config *KafkaConfig) ([]kafka.TopicResult, *[]ACXCreateTopicEr
 
 	maxDur, _ := time.ParseDuration("60s")
 
-	for _, topicSpec := range topicSpecs {
+	for _, topicSpec := range a.topicSpecs {
 		fmt.Printf("Creating Topic: %v\n", topicSpec.Topic)
 	}
 
-	results, _ := client.CreateTopics(ctx, topicSpecs, kafka.SetAdminOperationTimeout(maxDur))
+	results, error := a.AdminClient.CreateTopics(ctx, a.topicSpecs, kafka.SetAdminOperationTimeout(maxDur))
 
-	client.Close()
+	if error != nil {
+		panic(err)
+	}
 
-	return results, nil
+	return results
 }
 
 // DeleteTopics deletes topics
-func DeleteTopics(config *KafkaConfig) ([]kafka.TopicResult, *[]ACXCreateTopicError) {
-	topicSpecs := parseConfig(config)
+func (a *ACXKafkaClient) DeleteTopics(config *KafkaConfig) []kafka.TopicResult {
+	errors := a.checkAvailability()
 
-	errors := checkAvailability(&topicSpecs, strings.Join(config.Hosts, ","))
-
-	if len(*errors) < len(topicSpecs) {
-		return nil, errors
-	}
-
-	client, err := kafka.NewAdminClient(&kafka.ConfigMap{
-		"bootstrap.servers": strings.Join(config.Hosts, ","),
-	})
-
-	if err != nil {
-		fmt.Printf("Failed Connecting: %v\n", err)
+	if len(*errors) < len(a.topicSpecs) {
+		panic(errors)
 	}
 
 	topicNames := make([]string, 0)
 
-	for _, topic := range topicSpecs {
+	for _, topic := range a.topicSpecs {
 		topicNames = append(topicNames, topic.Topic)
 	}
 
@@ -177,15 +154,11 @@ func DeleteTopics(config *KafkaConfig) ([]kafka.TopicResult, *[]ACXCreateTopicEr
 		fmt.Printf("Deleting Topic: %v\n", topicName)
 	}
 
-	results, err := client.DeleteTopics(ctx, topicNames, kafka.SetAdminOperationTimeout(maxDur))
+	results, err := a.AdminClient.DeleteTopics(ctx, topicNames, kafka.SetAdminOperationTimeout(maxDur))
 
 	if err != nil {
-		fmt.Printf("Failed to delete topics: %v\n", err)
-
-		client.Close()
-		return results, &[]ACXCreateTopicError{ACXCreateTopicError{Message: err.Error()}}
+		panic(err)
 	}
 
-	client.Close()
-	return results, nil
+	return results
 }

@@ -3,10 +3,12 @@ package kafkautil
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
 
 func TestLoadConfig(t *testing.T) {
-	config, err := loadConfig(".")
+	config, err := UnmarshalConfig(".", "kafka-config.yml")
 
 	if err != nil {
 		t.Error("Got an Error")
@@ -37,7 +39,15 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-var config, _ = loadConfig(".")
+func connect() *ACXKafkaClient {
+	config := UnmarshalConfig(".", "kafka-config.yml")
+
+	client, _ := kafka.NewAdminClient(&kafka.ConfigMap{
+		"bootstrap.servers": config.Hosts,
+	})
+
+	return &ACXKafkaClient{AdminClient: client}
+}
 
 func TestCreateTopics(t *testing.T) {
 	_, err := CreateTopics(config)
