@@ -2,17 +2,16 @@ group: unit_test1
 hosts: 
   - "172.22.4.61"
 port: 9092
-topics: 
+topics:
   - 
-    Family: metadata
-    Name: ac.init.metadata.unit_test1
-    Partitions: 1
+    Topic: ac.init.metadata.unit_test1
+    NumPartitions: 1
+    ReplicationFactor: 3
   - 
-    Family: txn
-    Name: ac.init.txn.unit_test1
-    Partitions: 8
+    Topic: ac.init.txn.unit_test1
+    NumPartitions: 8
+    ReplicationFactor: 3
   - 
-    Family: derived
-    Name: ac.init.timeseries.unit_test1
-    Partitions: 12
-replicationFactor: 3
+    Topic: ac.init.timeseries.unit_test1
+    NumPartitions: 12
+    ReplicationFactor: 3

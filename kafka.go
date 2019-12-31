@@ -9,29 +9,6 @@ import (
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
 
-// ACXKafkaClient Wrapper on Kafka Client with ACX Specific functions
-type ACXKafkaClient struct {
-	AdminClient *kafka.AdminClient
-	topicSpecs  []kafka.TopicSpecification
-}
-
-// NewACXKafkaClient Creates a new KafkaClient
-func (a *ACXKafkaClient) NewACXKafkaClient(client *kafka.AdminClient, config *KafkaConfig) *ACXKafkaClient {
-	a.topicSpecs = make([]kafka.TopicSpecification, 0)
-
-	for _, topic := range config.Topics {
-		a.topicSpecs = append(a.topicSpecs, kafka.TopicSpecification{
-			Topic:             topic.Name,
-			NumPartitions:     topic.Partitions,
-			ReplicationFactor: config.ReplicationFactor,
-		})
-	}
-
-	return &ACXKafkaClient{
-		AdminClient: client,
-	}
-}
-
 // UnmarshalConfig takes in a path and loads the KafkaConfig
 func UnmarshalConfig(path string, fileName string) *KafkaConfig {
 	viper.Set("Verbose", true)
@@ -51,66 +28,77 @@ func UnmarshalConfig(path string, fileName string) *KafkaConfig {
 	return &config
 }
 
-func (a *ACXKafkaClient) verifyTopic(topic *kafka.TopicSpecification) (*ACXTopicValidationResult, *ACXTopicValidationError) {
-	meta, _ := a.AdminClient.GetMetadata(nil, true, 2000)
-
-	for _, t := range meta.Topics {
-		if t.Topic == topic.Topic && len(t.Partitions) == topic.NumPartitions {
-			return &ACXTopicValidationResult{Topic: t}, nil
-		}
-	}
-
-	return nil, &ACXTopicValidationError{Message: "Not Found"}
+// ACXKafkaClient Wrapper on Kafka Client with ACX Specific functions
+type ACXKafkaClient struct {
+	AdminClient *kafka.AdminClient
 }
 
-func (a *ACXKafkaClient) topicExists(topic *kafka.TopicSpecification) bool {
-	meta, _ := a.AdminClient.GetMetadata(nil, true, 2000)
+// ValidateTopic Checks if the topic exists and the partition count is correct
+func (a *ACXKafkaClient) validateTopic(topic *kafka.TopicSpecification, meta *kafka.Metadata) *ACXTopicValidationResult {
+	topicMeta := meta.Topics[topic.Topic]
 
-	for _, t := range meta.Topics {
-		if t.Topic == topic.Topic {
-			return false
-		}
+	if topicMeta.Topic == "" {
+		return &ACXTopicValidationResult{&topicMeta, &ACXTopicValidationError{Message: "Topic Not Found", Topic: topic}}
 	}
 
-	return true
+	if len(topicMeta.Partitions) != topic.NumPartitions {
+		return &ACXTopicValidationResult{&topicMeta, &ACXTopicValidationError{Message: "Incorrect Partion Count", Topic: topic}}
+	}
+
+	return &ACXTopicValidationResult{&topicMeta, &ACXTopicValidationError{}}
 }
 
-func (a *ACXKafkaClient) verifyTopics() *[]ACXCreateTopicError {
-	errors := make([]ACXCreateTopicError, 0)
+// ValidateTopic Checks if the topic exists and the partition count is correct
+func (a *ACXKafkaClient) exists(topicSpecs []kafka.TopicSpecification) (bool, *kafka.TopicMetadata) {
+	const allTopics = true
 
-	for _, topicSpec := range a.topicSpecs {
-		if a.topicExists(&topicSpec) == false {
-			errors = append(errors, ACXCreateTopicError{topicSpec, "Unavailable"})
+	meta, error := a.AdminClient.GetMetadata(nil, allTopics, 2000)
+	if error != nil {
+		panic(error)
+	}
+
+	for _, topicSpec := range topicSpecs {
+		topicMeta := meta.Topics[topicSpec.Topic]
+
+		if topicMeta.Topic != "" {
+			return true, &topicMeta
 		}
 	}
 
-	return &errors
+	return false, nil
 }
 
-func (a *ACXKafkaClient) checkAvailability() *[]ACXCreateTopicError {
-	errors := make([]ACXCreateTopicError, 0)
+// ValidateTopics analyzes created topics to match the specs passed in
+func (a *ACXKafkaClient) ValidateTopics(topicSpecs []kafka.TopicSpecification) (*[]ACXTopicValidationResult, bool) {
+	const allTopics = true
+	results := make([]ACXTopicValidationResult, 0)
+	var success = true
 
-	for _, topicSpec := range a.topicSpecs {
-		_, error := a.verifyTopic(&topicSpec)
+	meta, error := a.AdminClient.GetMetadata(nil, allTopics, 2000)
+	if error != nil {
+		panic(error)
+	}
 
-		if error != nil {
-			errors = append(errors, ACXCreateTopicError{topicSpec, "Unavailable"})
+	for _, topicSpec := range topicSpecs {
+		result := a.validateTopic(&topicSpec, meta)
+
+		results = append(results, *result)
+
+		if result.Error.Error() != "Success" {
+			success = false
 		}
 	}
 
-	if len(errors) > 0 {
-		return &errors
-	}
-
-	return nil
+	return &results, success
 }
 
 // CreateTopics create topics based on configuration file
-func (a *ACXKafkaClient) CreateTopics() []kafka.TopicResult {
-	err := a.checkAvailability()
+func (a *ACXKafkaClient) CreateTopics(topicSpecs []kafka.TopicSpecification) []kafka.TopicResult {
+	exists, topicMeta := a.exists(topicSpecs)
 
-	if err != nil {
-		panic(err)
+	if exists == true {
+		fmt.Println("Topic " + topicMeta.Topic + " Exists")
+		return make([]kafka.TopicResult, 0)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -118,30 +106,20 @@ func (a *ACXKafkaClient) CreateTopics() []kafka.TopicResult {
 
 	maxDur, _ := time.ParseDuration("60s")
 
-	for _, topicSpec := range a.topicSpecs {
-		fmt.Printf("Creating Topic: %v\n", topicSpec.Topic)
-	}
-
-	results, error := a.AdminClient.CreateTopics(ctx, a.topicSpecs, kafka.SetAdminOperationTimeout(maxDur))
+	results, error := a.AdminClient.CreateTopics(ctx, topicSpecs, kafka.SetAdminOperationTimeout(maxDur))
 
 	if error != nil {
-		panic(err)
+		panic(error)
 	}
 
 	return results
 }
 
 // DeleteTopics deletes topics
-func (a *ACXKafkaClient) DeleteTopics(config *KafkaConfig) []kafka.TopicResult {
-	errors := a.checkAvailability()
-
-	if len(*errors) < len(a.topicSpecs) {
-		panic(errors)
-	}
-
+func (a *ACXKafkaClient) DeleteTopics(topicSpecs []kafka.TopicSpecification) []kafka.TopicResult {
 	topicNames := make([]string, 0)
 
-	for _, topic := range a.topicSpecs {
+	for _, topic := range topicSpecs {
 		topicNames = append(topicNames, topic.Topic)
 	}
 
@@ -149,10 +127,6 @@ func (a *ACXKafkaClient) DeleteTopics(config *KafkaConfig) []kafka.TopicResult {
 	defer cancel()
 
 	maxDur, _ := time.ParseDuration("60s")
-
-	for _, topicName := range topicNames {
-		fmt.Printf("Deleting Topic: %v\n", topicName)
-	}
 
 	results, err := a.AdminClient.DeleteTopics(ctx, topicNames, kafka.SetAdminOperationTimeout(maxDur))
 

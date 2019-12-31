@@ -8,29 +8,17 @@ import (
 )
 
 func TestLoadConfig(t *testing.T) {
-	config, err := UnmarshalConfig(".", "kafka-config.yml")
-
-	if err != nil {
-		t.Error("Got an Error")
-	}
+	config := UnmarshalConfig(".", "kafka-config.yml")
 
 	if len(config.Hosts) != 1 {
 		t.Error("Invalid Hosts")
-	}
-
-	if config.ReplicationFactor != 3 {
-		t.Error("Invalid Replication Factor")
 	}
 
 	if len(config.Topics) != 3 {
 		t.Error("Invalid Topics")
 	}
 
-	if config.Topics[0].Family != "metadata" {
-		t.Error("Invalid Topic Family")
-	}
-
-	if config.Topics[0].Partitions != 1 {
+	if config.Topics[0].NumPartitions != 1 {
 		t.Error("Invalid Partition Count")
 	}
 
@@ -39,53 +27,62 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func connect() *ACXKafkaClient {
-	config := UnmarshalConfig(".", "kafka-config.yml")
+var config *KafkaConfig = UnmarshalConfig(".", "kafka-config.yml")
 
+func connect(hosts string) *ACXKafkaClient {
 	client, _ := kafka.NewAdminClient(&kafka.ConfigMap{
-		"bootstrap.servers": config.Hosts,
+		"bootstrap.servers": hosts,
 	})
 
 	return &ACXKafkaClient{AdminClient: client}
 }
 
+var client *ACXKafkaClient = connect(strings.Join(config.Hosts, ","))
+
 func TestCreateTopics(t *testing.T) {
-	_, err := CreateTopics(config)
-	if err != nil {
-		t.Error("Got an Error", err)
+	client.CreateTopics(config.Topics)
+}
+
+func TestCreateTopicsExisting(t *testing.T) {
+	result := client.CreateTopics(config.Topics)
+
+	if len(result) != 0 {
+		t.Error("Invalid Error")
 	}
 }
 
-func TestCreateTopicsError(t *testing.T) {
-	results, err := CreateTopics(config)
-	if results != nil {
-		t.Error("Got an Error", err)
+func TesValidateTopicsIncorrectTopicName(t *testing.T) {
+	results, success := client.ValidateTopics([]kafka.TopicSpecification{kafka.TopicSpecification{
+		Topic:             "monkeyDangus",
+		NumPartitions:     1,
+		ReplicationFactor: 3,
+	}})
+
+	if success == true {
+		t.Error(results)
+	}
+}
+
+func TestValidateTopicsIncorrectPartitionCount(t *testing.T) {
+	results, success := client.ValidateTopics([]kafka.TopicSpecification{kafka.TopicSpecification{
+		Topic:             config.Topics[0].Topic,
+		NumPartitions:     config.Topics[0].NumPartitions + 1,
+		ReplicationFactor: config.Topics[0].ReplicationFactor,
+	}})
+
+	if success == true {
+		t.Error(results)
 	}
 }
 
 func TestDeleteTopics(t *testing.T) {
-	_, err := DeleteTopics(config)
-	if err != nil {
-		t.Error("Got an Error", err)
-	}
+	client.DeleteTopics(config.Topics)
+}
+
+func TestCreateTopicsError(t *testing.T) {
+	client.CreateTopics(config.Topics)
 }
 
 func TestDeleteTopicsError(t *testing.T) {
-	_, err := DeleteTopics(config)
-	if err == nil {
-		t.Error("Got an Error", err)
-	}
-}
-
-func TestValidateTopics(t *testing.T) {
-	CreateTopics(config)
-
-	topics := parseConfig(config)
-	flag, _ := validateTopics(&topics, strings.Join(config.Hosts, ","))
-
-	if flag == false {
-		t.Error("Flag is false")
-	}
-
-	DeleteTopics(config)
+	client.DeleteTopics(config.Topics)
 }
